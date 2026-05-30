@@ -18,8 +18,8 @@ use tracing_subscriber::layer::SubscriberExt;
 fn sqlx_query_event_becomes_db_record() {
     let h = harness(|opts| opts.server_name = Some("svc".into()));
 
-    let subscriber = tracing_subscriber::registry()
-        .with(AllstakSqlxLayer::new().database_type("postgres"));
+    let subscriber =
+        tracing_subscriber::registry().with(AllstakSqlxLayer::new().database_type("postgres"));
 
     Hub::run(h.hub.clone(), || {
         // Seed an active trace/span so the record is correlated.

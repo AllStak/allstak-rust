@@ -1,5 +1,6 @@
 //! Client configuration.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::integration::Integration;
@@ -54,7 +55,9 @@ pub struct ClientOptions {
     /// Module prefixes always marked not-in-app.
     pub in_app_exclude: Vec<String>,
 
-    /// Final per-event hook; return `None` to drop.
+    /// Final per-event hook; receives a sanitized event when
+    /// `send_default_pii` is false. Return `None` to drop. The SDK scrubs again
+    /// after the hook before persistence/network delivery.
     pub before_send: Option<BeforeSend>,
     /// Per-breadcrumb hook; return `None` to drop.
     pub before_breadcrumb: Option<BeforeBreadcrumb>,
@@ -79,6 +82,15 @@ pub struct ClientOptions {
 
     /// Bounded queue capacity for the transport worker.
     pub transport_queue_size: usize,
+
+    /// Persist retryable transport failures to disk for replay on the next init.
+    pub enable_offline_queue: bool,
+    /// Directory for persisted envelopes. `None` uses a temp-dir AllStak path.
+    pub offline_queue_dir: Option<PathBuf>,
+    /// Maximum persisted envelope count. Oldest entries are removed first.
+    pub offline_queue_max_events: usize,
+    /// Maximum persisted queue bytes. Oldest entries are removed first.
+    pub offline_queue_max_bytes: u64,
 }
 
 impl std::fmt::Debug for ClientOptions {
@@ -123,6 +135,10 @@ impl Default for ClientOptions {
             integrations: Vec::new(),
             transport: None,
             transport_queue_size: 1000,
+            enable_offline_queue: true,
+            offline_queue_dir: None,
+            offline_queue_max_events: 100,
+            offline_queue_max_bytes: 5 * 1024 * 1024,
         }
     }
 }

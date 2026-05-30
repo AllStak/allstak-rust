@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use uuid::Uuid;
 
 use crate::client::Client;
+use crate::diagnostics::Diagnostics;
 use crate::protocol::{Breadcrumb, ErrorEvent, SessionStatus, User};
 use crate::scope::Scope;
 use crate::session::Session;
@@ -319,6 +320,26 @@ impl Hub {
             Some(c) => c.flush(timeout),
             None => true,
         }
+    }
+
+    /// Counter-only diagnostics for this hub and its client.
+    pub fn get_diagnostics(&self) -> Diagnostics {
+        let mut diagnostics = self
+            .client()
+            .map(|client| client.get_diagnostics())
+            .unwrap_or_else(|| Diagnostics {
+                disabled: true,
+                sanitizer_redaction_count: crate::scrub::redaction_count(),
+                ..Diagnostics::default()
+            });
+        if let Ok(inner) = self.inner.read() {
+            if let Some(scope) = inner.scopes.last() {
+                diagnostics.active_trace_count = if scope.trace_id().is_some() { 1 } else { 0 };
+                diagnostics.active_span_count = if scope.span_id().is_some() { 1 } else { 0 };
+                diagnostics.breadcrumb_count = scope.breadcrumbs.len() as u64;
+            }
+        }
+        diagnostics
     }
 }
 

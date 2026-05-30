@@ -8,9 +8,36 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Marker substituted for redacted values.
 pub const REDACTED: &str = "[redacted]";
+static REDACTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+const SENSITIVE_KEY_TERMS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "password",
+    "passwd",
+    "pwd",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "x-allstak-key",
+    "x-auth-token",
+    "x-access-token",
+    "token",
+    "bearer",
+    "jwt",
+    "secret",
+    "credit_card",
+    "card_number",
+    "cvv",
+    "ssn",
+    "csrf",
+];
 
 static EMAIL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}").expect("email regex"));
@@ -51,6 +78,9 @@ pub fn scrub_string(s: &str) -> String {
             }
         })
         .into_owned();
+    if out != s {
+        REDACTION_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
     out
 }
 
@@ -66,12 +96,27 @@ pub fn scrub_value(value: &mut Value) {
             }
         }
         Value::Object(map) => {
-            for (_k, v) in map.iter_mut() {
-                scrub_value(v);
+            for (k, v) in map.iter_mut() {
+                if is_sensitive_key(k) {
+                    REDACTION_COUNT.fetch_add(1, Ordering::Relaxed);
+                    *v = Value::String(REDACTED.to_string());
+                } else {
+                    scrub_value(v);
+                }
             }
         }
         _ => {}
     }
+}
+
+/// Process-wide sanitizer redaction count. Counter only; no payload data.
+pub fn redaction_count() -> u64 {
+    REDACTION_COUNT.load(Ordering::Relaxed)
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    SENSITIVE_KEY_TERMS.iter().any(|term| lower.contains(term))
 }
 
 #[cfg(test)]
@@ -115,5 +160,18 @@ mod tests {
         assert_eq!(v["b"][0], serde_json::json!("[redacted]"));
         assert_eq!(v["b"][1], serde_json::json!("ok"));
         assert_eq!(v["c"]["card"], serde_json::json!("[redacted]"));
+    }
+
+    #[test]
+    fn scrubs_sensitive_keys() {
+        let mut v = serde_json::json!({
+            "Authorization": "Bearer abc",
+            "nested": { "apiKey": "key-123" },
+            "safe": "ok"
+        });
+        scrub_value(&mut v);
+        assert_eq!(v["Authorization"], serde_json::json!("[redacted]"));
+        assert_eq!(v["nested"]["apiKey"], serde_json::json!("[redacted]"));
+        assert_eq!(v["safe"], serde_json::json!("ok"));
     }
 }

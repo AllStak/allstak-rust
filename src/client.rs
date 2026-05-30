@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::diagnostics::Diagnostics;
 use crate::envelope::{DataCategory, Envelope};
 use crate::options::ClientOptions;
 use crate::protocol::{
@@ -25,6 +26,8 @@ pub struct Client {
     transport: Option<Arc<dyn Transport>>,
     /// Simple deterministic-friendly counter feeding the sample-rate dice roll.
     sample_counter: AtomicU64,
+    events_captured: AtomicU64,
+    events_dropped: AtomicU64,
 }
 
 impl Client {
@@ -52,6 +55,8 @@ impl Client {
             options,
             transport,
             sample_counter: AtomicU64::new(0),
+            events_captured: AtomicU64::new(0),
+            events_dropped: AtomicU64::new(0),
         })
     }
 
@@ -87,6 +92,7 @@ impl Client {
     /// by `before_send`, sampling or rate limits — the id reflects acceptance
     /// into the pipeline, not delivery).
     pub fn capture_event(&self, mut event: ErrorEvent, scope: &Scope) -> Uuid {
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         let event_id = event.event_id;
 
         // 1. Apply identity defaults from options.
@@ -99,26 +105,57 @@ impl Client {
         for integration in &self.options.integrations {
             match integration.process_event(event, &self.options) {
                 Some(e) => event = e,
-                None => return event_id, // dropped by an integration
+                None => {
+                    self.events_dropped.fetch_add(1, Ordering::Relaxed);
+                    return event_id;
+                } // dropped by an integration
             }
         }
 
-        // 4. before_send hook.
+        // 4. Sanitize before before_send, then run hook. The delivery path
+        // scrubs again after the hook, so callbacks cannot reintroduce secrets.
+        if !self.options.send_default_pii {
+            event = self.sanitized_event_for_hook(event);
+        }
         if let Some(hook) = &self.options.before_send {
             match hook(event) {
                 Some(e) => event = e,
-                None => return event_id,
+                None => {
+                    self.events_dropped.fetch_add(1, Ordering::Relaxed);
+                    return event_id;
+                }
             }
         }
 
         // 5. sample_rate dice roll.
         if !self.sample() {
+            self.events_dropped.fetch_add(1, Ordering::Relaxed);
             return event_id;
         }
 
         // 6. Serialize, scrub, deliver.
         self.deliver(&event, "/ingest/v1/errors", DataCategory::Error);
         event_id
+    }
+
+    fn sanitized_event_for_hook(&self, event: ErrorEvent) -> ErrorEvent {
+        let original = event.clone();
+        let mut value = match serde_json::to_value(event) {
+            Ok(value) => value,
+            Err(_) => return self.redacted_event(original),
+        };
+        scrub::scrub_value(&mut value);
+        match serde_json::from_value(value) {
+            Ok(event) => event,
+            Err(_) => self.redacted_event(original),
+        }
+    }
+
+    fn redacted_event(&self, mut event: ErrorEvent) -> ErrorEvent {
+        event.message = scrub::REDACTED.to_string();
+        event.metadata = Some(serde_json::json!({ "redacted": true }));
+        event.breadcrumbs = None;
+        event
     }
 
     /// Default identity fields from options onto an event.
@@ -143,10 +180,14 @@ impl Client {
     /// Apply the `before_breadcrumb` hook, returning the (possibly mutated)
     /// breadcrumb or `None` if it should be dropped.
     pub(crate) fn process_breadcrumb(&self, breadcrumb: Breadcrumb) -> Option<Breadcrumb> {
-        match &self.options.before_breadcrumb {
+        let processed = match &self.options.before_breadcrumb {
             Some(hook) => hook(breadcrumb),
             None => Some(breadcrumb),
+        };
+        if processed.is_none() {
+            self.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
+        processed
     }
 
     fn sample(&self) -> bool {
@@ -171,6 +212,7 @@ impl Client {
         category: DataCategory,
     ) {
         let Some(transport) = &self.transport else {
+            self.events_dropped.fetch_add(1, Ordering::Relaxed);
             return;
         };
         let mut env = Envelope::new(path, category, payload);
@@ -187,6 +229,7 @@ impl Client {
         if spans.is_empty() {
             return;
         }
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         let batch = SpanBatch { spans };
         self.deliver(&batch, "/ingest/v1/spans", DataCategory::Transaction);
     }
@@ -198,6 +241,7 @@ impl Client {
 
     /// Send a structured log record.
     pub fn capture_log(&self, log: LogRecord) {
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         self.deliver(&log, "/ingest/v1/logs", DataCategory::Log);
     }
 
@@ -206,6 +250,7 @@ impl Client {
         if requests.is_empty() {
             return;
         }
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         let batch = HttpRequestBatch { requests };
         self.deliver(
             &batch,
@@ -224,27 +269,65 @@ impl Client {
         if queries.is_empty() {
             return;
         }
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         let batch = DbQueryBatch { queries };
         self.deliver(&batch, "/ingest/v1/db", DataCategory::Db);
     }
 
     /// Register the start of a session.
     pub fn send_session_start(&self, start: &SessionStart) {
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         self.deliver(start, "/ingest/v1/sessions/start", DataCategory::Session);
     }
 
     /// Register the end of a session.
     pub fn send_session_end(&self, end: &SessionEnd) {
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         self.deliver(end, "/ingest/v1/sessions/end", DataCategory::Session);
     }
 
     /// Send a heartbeat / cron check-in.
     pub fn send_heartbeat(&self, hb: &Heartbeat) {
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         self.deliver(hb, "/ingest/v1/heartbeat", DataCategory::Heartbeat);
     }
 
     /// Register a release (best-effort).
     pub fn send_release(&self, release: &ReleaseRegistration) {
+        self.events_captured.fetch_add(1, Ordering::Relaxed);
         self.deliver(release, "/ingest/v1/releases", DataCategory::Release);
+    }
+
+    /// Counter-only diagnostics. Scope-derived active trace/span/breadcrumb
+    /// values are filled by [`crate::Hub::get_diagnostics`].
+    pub fn get_diagnostics(&self) -> Diagnostics {
+        let tx = self
+            .transport
+            .as_ref()
+            .map(|t| t.diagnostics())
+            .unwrap_or_default();
+        Diagnostics {
+            events_captured: self
+                .events_captured
+                .load(Ordering::Relaxed)
+                .max(tx.events_captured),
+            events_sent: tx.events_sent,
+            events_failed: tx.events_failed,
+            events_dropped: self.events_dropped.load(Ordering::Relaxed) + tx.events_dropped,
+            events_persisted: tx.events_persisted,
+            events_replayed: tx.events_replayed,
+            queue_size: tx.queue_size,
+            retry_attempts: tx.retry_attempts,
+            rate_limited_count: tx.rate_limited_count,
+            compressed_payloads: tx.compressed_payloads,
+            uncompressed_payloads: tx.uncompressed_payloads,
+            compression_bytes_saved: tx.compression_bytes_saved,
+            sanitizer_redaction_count: scrub::redaction_count(),
+            active_trace_count: 0,
+            active_span_count: 0,
+            breadcrumb_count: 0,
+            session_recovery_count: 0,
+            disabled: self.transport.is_none() || tx.disabled,
+        }
     }
 }

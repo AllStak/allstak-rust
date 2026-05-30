@@ -38,6 +38,7 @@ backtrace = "0.3"
 time = { version = "0.3", features = ["formatting", "macros"] }
 regex = "1"
 once_cell = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Optional / feature-gated integration dependencies.
 tracing = { version = "0.1", optional = true }

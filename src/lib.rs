@@ -47,6 +47,7 @@
 pub mod backtrace;
 mod client;
 pub mod db;
+pub mod diagnostics;
 pub mod envelope;
 mod event;
 mod hub;
@@ -83,6 +84,7 @@ use std::time::Duration;
 
 pub use client::Client;
 pub use db::{capture_query as capture_db_query, normalize_query, query_hash, query_type};
+pub use diagnostics::Diagnostics;
 pub use hub::{last_event_id, Hub, ScopeGuard};
 pub use integration::Integration;
 pub use options::{ClientOptions, IntoClientOptions, SessionMode, DEFAULT_HOST};
@@ -226,7 +228,8 @@ pub fn init_from_env() -> ClientInitGuard {
         }
     }
     if let Ok(pii) = std::env::var("ALLSTAK_SEND_DEFAULT_PII") {
-        options.send_default_pii = matches!(pii.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        options.send_default_pii =
+            matches!(pii.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
 
     let guard = init(options);
@@ -326,6 +329,11 @@ pub fn end_session_with_status(status: SessionStatus) {
 /// Flush the current hub's transport queue.
 pub fn flush(timeout: Duration) -> bool {
     Hub::current().flush(timeout)
+}
+
+/// Privacy-safe SDK diagnostics. Contains counters and queue sizes only.
+pub fn get_diagnostics() -> Diagnostics {
+    Hub::current().get_diagnostics()
 }
 
 #[cfg(feature = "anyhow")]

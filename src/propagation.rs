@@ -1,5 +1,7 @@
 //! Distributed-trace propagation header parsing and stamping.
 
+use crate::util;
+
 /// Header names the SDK reads for an inbound trace id.
 pub const TRACE_ID_HEADERS: [&str; 2] = ["x-allstak-trace-id", "x-trace-id"];
 /// Header names the SDK reads for an inbound request id.
@@ -40,11 +42,46 @@ where
     None
 }
 
+fn first_valid_trace<'a, F>(names: &[&str], get: &F) -> Option<String>
+where
+    F: Fn(&str) -> Option<&'a str>,
+{
+    for name in names {
+        if let Some(v) = get(name) {
+            let normalized = v.trim().to_ascii_lowercase();
+            if is_valid_trace_id(&normalized) {
+                return Some(normalized);
+            }
+        }
+    }
+    None
+}
+
+fn is_valid_trace_id(value: &str) -> bool {
+    value.len() == 32
+        && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        && !value.bytes().all(|b| b == b'0')
+}
+
+fn is_valid_span_id(value: &str) -> bool {
+    value.len() == 16
+        && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        && !value.bytes().all(|b| b == b'0')
+}
+
 /// Parse a W3C `traceparent` value: `00-<trace>-<span>-<flags>`.
 fn parse_traceparent(value: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = value.trim().split('-').collect();
-    if parts.len() == 4 && parts[1].len() == 32 && parts[2].len() == 16 {
-        Some((parts[1].to_string(), parts[2].to_string()))
+    if parts.len() != 4 || parts[0] != "00" || parts[3].len() != 2 {
+        return None;
+    }
+    let trace = parts[1].to_ascii_lowercase();
+    let span = parts[2].to_ascii_lowercase();
+    if is_valid_trace_id(&trace)
+        && is_valid_span_id(&span)
+        && parts[3].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        Some((trace, span))
     } else {
         None
     }
@@ -67,7 +104,7 @@ where
         }
     }
     if ctx.trace_id.is_none() {
-        ctx.trace_id = first(&TRACE_ID_HEADERS, &get);
+        ctx.trace_id = first_valid_trace(&TRACE_ID_HEADERS, &get);
     }
     ctx.request_id = first(&REQUEST_ID_HEADERS, &get);
     ctx.baggage = get("baggage").map(|s| s.to_string());
@@ -81,19 +118,35 @@ where
 /// values minted by [`crate::util::new_trace_id`] / [`crate::util::new_span_id`]
 /// are accepted as-is.
 pub fn format_traceparent(trace_id: &str, span_id: &str) -> String {
-    let trace = normalize_hex(trace_id, 32);
-    let span = normalize_hex(span_id, 16);
+    let trace = normalize_trace_id(trace_id);
+    let span = normalize_span_id(span_id);
     format!("00-{trace}-{span}-01")
 }
 
-/// Pad/truncate a hex string to exactly `width` lower-hex chars.
-fn normalize_hex(value: &str, width: usize) -> String {
+/// Normalize a value to a valid 32-char lower-hex W3C trace id.
+pub fn normalize_trace_id(value: &str) -> String {
+    normalize_hex(value, 32, util::new_trace_id, is_valid_trace_id)
+}
+
+/// Normalize a value to a valid 16-char lower-hex W3C span id.
+pub fn normalize_span_id(value: &str) -> String {
+    normalize_hex(value, 16, util::new_span_id, is_valid_span_id)
+}
+
+/// Pad/truncate a hex string to exactly `width` lower-hex chars; if the input
+/// has no usable entropy or normalizes to all-zero, mint a fresh id.
+fn normalize_hex(
+    value: &str,
+    width: usize,
+    fallback: fn() -> String,
+    valid: fn(&str) -> bool,
+) -> String {
     let cleaned: String = value
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    if cleaned.len() >= width {
+    let candidate = if cleaned.len() >= width {
         cleaned[..width].to_string()
     } else {
         let mut s = String::with_capacity(width);
@@ -102,6 +155,11 @@ fn normalize_hex(value: &str, width: usize) -> String {
         }
         s.push_str(&cleaned);
         s
+    };
+    if valid(&candidate) {
+        candidate
+    } else {
+        fallback()
     }
 }
 
@@ -119,9 +177,10 @@ where
     F: FnMut(&str, &str),
 {
     if let Some(trace_id) = &ctx.trace_id {
-        set(OUT_TRACE_ID, trace_id);
+        let wire_trace_id = normalize_trace_id(trace_id);
+        set(OUT_TRACE_ID, &wire_trace_id);
         if let Some(span) = span_id {
-            set(TRACEPARENT, &format_traceparent(trace_id, span));
+            set(TRACEPARENT, &format_traceparent(&wire_trace_id, span));
         }
     }
     if let Some(request_id) = &ctx.request_id {
@@ -145,9 +204,15 @@ mod tests {
 
     #[test]
     fn reads_allstak_trace_header() {
-        let g = getter(HashMap::from([("x-allstak-trace-id", "abc123")]));
+        let g = getter(HashMap::from([(
+            "x-allstak-trace-id",
+            "0af7651916cd43dd8448eb211c80319c",
+        )]));
         let ctx = extract(g);
-        assert_eq!(ctx.trace_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            ctx.trace_id.as_deref(),
+            Some("0af7651916cd43dd8448eb211c80319c")
+        );
     }
 
     #[test]
@@ -156,6 +221,37 @@ mod tests {
             "traceparent",
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
         )]));
+        let ctx = extract(g);
+        assert_eq!(
+            ctx.trace_id.as_deref(),
+            Some("0af7651916cd43dd8448eb211c80319c")
+        );
+        assert_eq!(ctx.parent_span_id.as_deref(), Some("b7ad6b7169203331"));
+    }
+
+    #[test]
+    fn rejects_invalid_traceparent_and_bad_custom_trace_header() {
+        let g = getter(HashMap::from([
+            (
+                "traceparent",
+                "00-00000000000000000000000000000000-b7ad6b7169203331-01",
+            ),
+            ("x-allstak-trace-id", "not-a-valid-trace"),
+        ]));
+        let ctx = extract(g);
+        assert_eq!(ctx.trace_id, None);
+        assert_eq!(ctx.parent_span_id, None);
+    }
+
+    #[test]
+    fn valid_traceparent_takes_precedence_over_invalid_custom_trace_header() {
+        let g = getter(HashMap::from([
+            (
+                "traceparent",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ),
+            ("x-allstak-trace-id", "not-a-valid-trace"),
+        ]));
         let ctx = extract(g);
         assert_eq!(
             ctx.trace_id.as_deref(),
@@ -174,10 +270,16 @@ mod tests {
     #[test]
     fn format_traceparent_normalizes_widths() {
         let tp = format_traceparent("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331");
-        assert_eq!(tp, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+        assert_eq!(
+            tp,
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        );
         // Short ids are left-padded to the right width.
         let tp = format_traceparent("abc", "1");
-        assert_eq!(tp, "00-00000000000000000000000000000abc-0000000000000001-01");
+        assert_eq!(
+            tp,
+            "00-00000000000000000000000000000abc-0000000000000001-01"
+        );
     }
 
     #[test]
@@ -213,7 +315,10 @@ mod tests {
             extracted.trace_id.as_deref(),
             Some("0af7651916cd43dd8448eb211c80319c")
         );
-        assert_eq!(extracted.parent_span_id.as_deref(), Some("b7ad6b7169203331"));
+        assert_eq!(
+            extracted.parent_span_id.as_deref(),
+            Some("b7ad6b7169203331")
+        );
         assert_eq!(extracted.request_id.as_deref(), Some("req-42"));
     }
 

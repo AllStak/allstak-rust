@@ -165,7 +165,12 @@ where
 
         // The full statement, when present, is the most useful; fall back to
         // the summary sqlx always provides.
-        let sql = match v.statement.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let sql = match v
+            .statement
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(s) => s.to_string(),
             None => match &v.summary {
                 Some(s) => s.clone(),
