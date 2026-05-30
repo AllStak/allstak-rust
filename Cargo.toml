@@ -1,6 +1,6 @@
 [package]
 name = "allstak"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.81"
 license = "MIT"
@@ -19,6 +19,14 @@ tracing = ["dep:tracing", "dep:tracing-core", "dep:tracing-subscriber"]
 axum = ["dep:axum", "dep:tower", "dep:http", "dep:matchit"]
 actix = ["dep:actix-web", "dep:futures-util"]
 anyhow = ["dep:anyhow"]
+# Outbound HTTP auto-instrumentation: a reqwest-middleware that opens an
+# `http.client` child span, injects the active trace context, and emits an
+# outbound HttpRequestRecord. Default-off feature, default-on once wired.
+reqwest-middleware = ["dep:reqwest-middleware", "dep:async-trait", "dep:http"]
+# Database auto-instrumentation: a tracing layer that turns sqlx's own
+# `sqlx::query` telemetry into DbQueryRecords tied to the active span. Builds on
+# the `tracing` feature; needs no sqlx link (it reads sqlx's tracing events).
+sqlx = ["tracing"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -42,6 +50,10 @@ matchit = { version = "0.7", optional = true }
 actix-web = { version = "4", optional = true }
 futures-util = { version = "0.3", optional = true }
 anyhow = { version = "1", optional = true }
+# 0.4.x targets reqwest 0.12 (the version this crate already uses); 0.5+ moved
+# to reqwest 0.13 and would pull a second copy of reqwest into the graph.
+reqwest-middleware = { version = "0.4", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"

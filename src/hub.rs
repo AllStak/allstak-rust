@@ -301,6 +301,18 @@ impl Hub {
         self.configure_scope(|scope| scope.set_user(user.clone()));
     }
 
+    /// Snapshot the active distributed-trace context from the top scope.
+    ///
+    /// Used by outbound HTTP and DB instrumentation to propagate the current
+    /// trace/span/request ids without the caller threading them by hand.
+    pub fn current_trace_context(&self) -> crate::propagation::TraceContext {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|i| i.scopes.last().map(|s| s.trace_context()))
+            .unwrap_or_default()
+    }
+
     /// Wait for the transport queue to drain.
     pub fn flush(&self, timeout: std::time::Duration) -> bool {
         match self.client() {

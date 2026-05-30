@@ -101,6 +101,9 @@ where
         if let Some(tid) = &trace.trace_id {
             hub.configure_scope(|scope| scope.set_trace_id(Some(tid.clone())));
         }
+        if let Some(rid) = &req_id {
+            hub.configure_scope(|scope| scope.set_request_id(Some(rid.clone())));
+        }
 
         let started = Instant::now();
         let service = self.service.clone();

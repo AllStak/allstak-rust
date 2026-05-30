@@ -3,6 +3,50 @@
 All notable changes to the `allstak` crate are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-30
+
+Auto-instrumentation: make outbound HTTP and database tracing automatic, and
+add a zero-config entry point. All new behavior is additive and individually
+toggleable; existing APIs and payload shapes are unchanged.
+
+### Added
+
+- **`init_from_env`**: zero-config initialization. Reads `ALLSTAK_API_KEY` /
+  `ALLSTAK_DSN`, `ALLSTAK_RELEASE`, `ALLSTAK_ENVIRONMENT`,
+  `ALLSTAK_SERVER_NAME`, `ALLSTAK_DEBUG`, `ALLSTAK_SAMPLE_RATE`,
+  `ALLSTAK_SEND_DEFAULT_PII`, then installs the default integrations (the panic
+  hook) and — on the `tracing` feature — the global `tracing` subscriber (the
+  log/span layer, plus the `sqlx` DB layer when enabled) best-effort and
+  idempotently, so logs, spans and database queries are captured with no
+  further wiring.
+- **`reqwest-middleware` feature**: `AllstakHttpMiddleware`, a
+  `reqwest_middleware::Middleware` that, per outbound request and with no
+  per-call code, opens an `http.client` child span under the active trace,
+  injects the active trace context (`traceparent` + `X-AllStak-Trace-Id` /
+  `X-AllStak-Request-Id`) into the outbound headers, and records an outbound
+  `HttpRequestRecord` (`direction: "outbound"`). Crate-root conveniences
+  `instrumented_http_client()` / `instrumented_http_client_from(client)` wrap a
+  reqwest client in one line.
+- **`sqlx` feature**: `AllstakSqlxLayer`, a `tracing` layer that turns sqlx's
+  own `sqlx::query` telemetry into normalized `DbQueryRecord`s tied to the
+  active span and posted to `/ingest/v1/db` — with no per-query code and no
+  sqlx link (works for any sqlx backend). Configurable `database_type` label
+  and `min_duration` filter.
+- **`propagation::inject`** to complement `extract`: stamps the W3C
+  `traceparent` plus `X-AllStak-*` headers from a `TraceContext` (with
+  `propagation::format_traceparent`).
+- **DB helpers** at the crate root: `normalize_query` (literal/whitespace
+  stripping), `query_hash` (stable fingerprint), `query_type` (statement
+  classification) and `capture_db_query` (record a query tied to the active
+  span), backing the driver integrations and available for manual use.
+- **Scope**: `set_span_id` / `set_request_id` (and `span_id` / `trace_id` /
+  `request_id` / `trace_context` accessors) plus `Hub::current_trace_context`,
+  so outbound HTTP and DB instrumentation nest under the active request/span.
+  The `axum` and `actix` middleware now publish the active span/request id so
+  outbound calls and DB queries on the same request correlate automatically.
+
+[0.2.0]: https://github.com/AllStak/allstak-rust/releases/tag/v0.2.0
+
 ## [0.1.0] - 2026-05-29
 
 Initial release. A native Rust SDK implementing the AllStak ingest wire

@@ -103,14 +103,25 @@ where
         if let Some(tid) = &trace.trace_id {
             hub.configure_scope(|scope| scope.set_trace_id(Some(tid.clone())));
         }
+        if let Some(rid) = &trace.request_id {
+            hub.configure_scope(|scope| scope.set_request_id(Some(rid.clone())));
+        }
 
         let span = if self.start_transaction {
-            Some(Span::continued(
+            let span = Span::continued(
                 "http.server",
                 format!("{method} {path}"),
                 trace.trace_id.clone(),
                 trace.parent_span_id.clone(),
-            ))
+            );
+            // Publish the server span as the active span so outbound HTTP and
+            // DB instrumentation nest under it on this request's hub.
+            let (tid, sid) = (span.trace_id().to_string(), span.span_id().to_string());
+            hub.configure_scope(|scope| {
+                scope.set_trace_id(Some(tid.clone()));
+                scope.set_span_id(Some(sid.clone()));
+            });
+            Some(span)
         } else {
             None
         };

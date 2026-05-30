@@ -22,13 +22,31 @@ Enable the integrations you need:
 allstak = { version = "0.1", features = ["tracing", "axum"] }
 ```
 
-| Feature   | Default | What it adds |
-|-----------|---------|--------------|
-| `panic`   | yes     | Global panic hook that captures crashes as fatal events. |
-| `tracing` | no      | A `tracing-subscriber` layer: events → logs/breadcrumbs/events, spans → spans. |
-| `axum`    | no      | A tower `Layer` that records inbound requests and captures handler errors. |
-| `actix`   | no      | actix-web middleware with the same behavior. |
-| `anyhow`  | no      | `capture_anyhow` to capture an `anyhow::Error` chain. |
+| Feature              | Default | What it adds |
+|----------------------|---------|--------------|
+| `panic`              | yes     | Global panic hook that captures crashes as fatal events. |
+| `tracing`            | no      | A `tracing-subscriber` layer: events → logs/breadcrumbs/events, spans → spans. |
+| `axum`               | no      | A tower `Layer` that records inbound requests and captures handler errors. |
+| `actix`              | no      | actix-web middleware with the same behavior. |
+| `reqwest-middleware` | no      | Outbound HTTP auto-instrumentation: an `http.client` span, trace-context header injection, and an outbound request record — per call, no per-call code. |
+| `sqlx`               | no      | Database auto-instrumentation: a `tracing` layer that turns sqlx query telemetry into DB query records tied to the active span. |
+| `anyhow`             | no      | `capture_anyhow` to capture an `anyhow::Error` chain. |
+
+## Zero-config
+
+`init_from_env` reads `ALLSTAK_API_KEY` / `ALLSTAK_DSN`, `ALLSTAK_RELEASE`,
+`ALLSTAK_ENVIRONMENT`, `ALLSTAK_SERVER_NAME`, `ALLSTAK_DEBUG`,
+`ALLSTAK_SAMPLE_RATE` and `ALLSTAK_SEND_DEFAULT_PII`, installs the panic hook,
+and — with the `tracing` feature — also installs the global tracing subscriber
+(the log/span layer plus the `sqlx` DB layer when enabled). After one call you
+get crash, log, span and database capture with no further wiring:
+
+```rust
+fn main() {
+    let _guard = allstak::init_from_env();
+    // panics, logs, spans and sqlx queries are now captured automatically.
+}
+```
 
 ## Quick start
 
@@ -165,6 +183,59 @@ let app = App::new().wrap(Allstak::new());
 # let _ = app;
 # }
 ```
+
+## Outbound HTTP (reqwest)
+
+With the `reqwest-middleware` feature, wrap your reqwest client once and every
+outbound request opens an `http.client` span, propagates the active trace
+context downstream (`traceparent` + `X-AllStak-*`), and records an outbound
+request — no per-call code:
+
+```rust
+# #[cfg(feature = "reqwest-middleware")]
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let client = allstak::instrumented_http_client();
+let _ = client.get("https://api.example.com/things").send().await?;
+# Ok(())
+# }
+```
+
+To attach the middleware to a client you already build:
+
+```rust
+# #[cfg(feature = "reqwest-middleware")]
+# fn demo() -> reqwest_middleware::ClientWithMiddleware {
+use reqwest_middleware::ClientBuilder;
+use allstak::AllstakHttpMiddleware;
+
+ClientBuilder::new(reqwest::Client::new())
+    .with(AllstakHttpMiddleware::new())
+    .build()
+# }
+```
+
+When called inside a request handled by the `axum` / `actix` middleware, the
+client span nests under the request span and shares its trace automatically.
+
+## Database (sqlx)
+
+With the `sqlx` feature (which builds on `tracing`), add the DB layer alongside
+the tracing layer. Every sqlx statement is then captured as a normalized DB
+query record tied to the active span — no per-query code, any sqlx backend:
+
+```rust
+# #[cfg(all(feature = "sqlx", feature = "tracing"))]
+# fn demo() {
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(allstak::integrations::tracing::layer())
+    .with(allstak::integrations::sqlx::layer().database_type("postgres"))
+    .init();
+# }
+```
+
+`init_from_env` installs both layers for you when these features are enabled.
 
 ## Configuration
 

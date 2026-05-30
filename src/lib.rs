@@ -23,12 +23,22 @@
 //! // `_guard` flushes pending events when it drops.
 //! ```
 //!
+//! For the least possible configuration, [`init_from_env`] reads options from
+//! the environment and installs the panic hook plus (on the `tracing` feature)
+//! the global tracing subscriber so logs, spans and database queries are
+//! captured automatically.
+//!
 //! ## Features
 //!
 //! - `panic` (default): install a global panic hook that captures crashes.
-//! - `tracing`: a [`tracing_subscriber`] layer bridging events and spans.
+//! - `tracing`: a `tracing_subscriber` layer bridging events and spans.
 //! - `axum`: a tower layer that records inbound requests and handler errors.
 //! - `actix`: actix-web middleware with the same behavior.
+//! - `reqwest-middleware`: outbound HTTP auto-instrumentation — an
+//!   `http.client` span, trace-context header injection, and an outbound HTTP
+//!   request record, per call, with no per-call code.
+//! - `sqlx`: database auto-instrumentation — a `tracing` layer that turns
+//!   sqlx's query telemetry into DB query records tied to the active span.
 //! - `anyhow`: capture an [`anyhow::Error`] chain.
 
 #![forbid(unsafe_code)]
@@ -36,6 +46,7 @@
 
 pub mod backtrace;
 mod client;
+pub mod db;
 pub mod envelope;
 mod event;
 mod hub;
@@ -59,6 +70,10 @@ pub mod integrations {
     pub mod actix;
     #[cfg(feature = "axum")]
     pub mod axum;
+    #[cfg(feature = "reqwest-middleware")]
+    pub mod reqwest;
+    #[cfg(feature = "sqlx")]
+    pub mod sqlx;
     #[cfg(feature = "tracing")]
     pub mod tracing;
 }
@@ -67,6 +82,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use client::Client;
+pub use db::{capture_query as capture_db_query, normalize_query, query_hash, query_type};
 pub use hub::{last_event_id, Hub, ScopeGuard};
 pub use integration::Integration;
 pub use options::{ClientOptions, IntoClientOptions, SessionMode, DEFAULT_HOST};
@@ -76,6 +92,12 @@ pub use protocol::{
 };
 pub use scope::Scope;
 pub use session::Session;
+
+#[cfg(feature = "reqwest-middleware")]
+pub use integrations::reqwest::{
+    instrumented_client as instrumented_http_client,
+    instrumented_client_from as instrumented_http_client_from, AllstakHttpMiddleware,
+};
 
 #[cfg(feature = "anyhow")]
 pub use crate::anyhow_support::capture_anyhow;
@@ -162,6 +184,79 @@ pub fn init(opts: impl IntoClientOptions) -> ClientInitGuard {
         shutdown_timeout,
         end_session_on_drop: auto_session,
     }
+}
+
+/// Zero-config initialization from the process environment.
+///
+/// Reads `ALLSTAK_API_KEY` / `ALLSTAK_DSN`, `ALLSTAK_RELEASE`,
+/// `ALLSTAK_ENVIRONMENT`, `ALLSTAK_SERVER_NAME`, `ALLSTAK_DEBUG`,
+/// `ALLSTAK_SAMPLE_RATE` and `ALLSTAK_SEND_DEFAULT_PII`, then calls [`init`] —
+/// which installs the default integrations (the panic hook on the `panic`
+/// feature). When the `tracing` feature is enabled it also installs the global
+/// `tracing` subscriber (the AllStak `tracing` layer, plus the `sqlx` DB-query
+/// layer when that feature is on) so logs, spans and database queries are
+/// captured automatically with no further wiring.
+///
+/// The `tracing` subscriber is installed best-effort: if a global subscriber is
+/// already set this is a no-op for the subscriber (the client still initializes
+/// and the panic hook is still installed), so it never panics on a double init.
+pub fn init_from_env() -> ClientInitGuard {
+    let mut options = ClientOptions::default();
+
+    if let Ok(key) = std::env::var("ALLSTAK_API_KEY") {
+        options.api_key = key;
+    } else if let Ok(dsn) = std::env::var("ALLSTAK_DSN") {
+        options.api_key = dsn;
+    }
+    if let Ok(release) = std::env::var("ALLSTAK_RELEASE") {
+        options.release = Some(release);
+    }
+    if let Ok(env) = std::env::var("ALLSTAK_ENVIRONMENT") {
+        options.environment = Some(env);
+    }
+    if let Ok(name) = std::env::var("ALLSTAK_SERVER_NAME") {
+        options.server_name = Some(name);
+    }
+    if let Ok(debug) = std::env::var("ALLSTAK_DEBUG") {
+        options.debug = matches!(debug.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    if let Ok(rate) = std::env::var("ALLSTAK_SAMPLE_RATE") {
+        if let Ok(r) = rate.parse::<f32>() {
+            options.sample_rate = r;
+        }
+    }
+    if let Ok(pii) = std::env::var("ALLSTAK_SEND_DEFAULT_PII") {
+        options.send_default_pii = matches!(pii.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+
+    let guard = init(options);
+
+    // Best-effort install of the global tracing subscriber so log/span/DB
+    // auto-instrumentation needs no extra code. A double-init is tolerated.
+    #[cfg(feature = "tracing")]
+    install_default_tracing_subscriber();
+
+    guard
+}
+
+/// Install the AllStak `tracing` subscriber as the process default, layering in
+/// the `sqlx` DB layer when that feature is on. Best-effort: a prior global
+/// subscriber is left untouched.
+#[cfg(feature = "tracing")]
+fn install_default_tracing_subscriber() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let registry = tracing_subscriber::registry().with(integrations::tracing::layer());
+
+    #[cfg(feature = "sqlx")]
+    let result = registry.with(integrations::sqlx::layer()).try_init();
+    #[cfg(not(feature = "sqlx"))]
+    let result = registry.try_init();
+
+    // Ignore an already-set global subscriber: the client is still live and the
+    // panic hook installed; the developer can install their own subscriber.
+    let _ = result;
 }
 
 // --- Global convenience functions (delegate to the current Hub) ---

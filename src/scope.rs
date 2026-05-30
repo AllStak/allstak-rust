@@ -17,6 +17,8 @@ pub struct Scope {
     pub(crate) fingerprint: Option<Vec<String>>,
     pub(crate) transaction: Option<String>,
     pub(crate) trace_id: Option<String>,
+    pub(crate) span_id: Option<String>,
+    pub(crate) request_id: Option<String>,
     pub(crate) breadcrumbs: VecDeque<Breadcrumb>,
     pub(crate) max_breadcrumbs: usize,
 }
@@ -68,6 +70,44 @@ impl Scope {
     /// Bind a trace id to this scope (used for distributed tracing).
     pub fn set_trace_id(&mut self, trace_id: Option<String>) {
         self.trace_id = trace_id;
+    }
+
+    /// Bind the active span id to this scope. Outbound HTTP and DB
+    /// instrumentation use it as the parent of the spans they open so child
+    /// work nests under the active request/transaction span.
+    pub fn set_span_id(&mut self, span_id: Option<String>) {
+        self.span_id = span_id;
+    }
+
+    /// The active span id, if any.
+    pub fn span_id(&self) -> Option<&str> {
+        self.span_id.as_deref()
+    }
+
+    /// The active trace id, if any.
+    pub fn trace_id(&self) -> Option<&str> {
+        self.trace_id.as_deref()
+    }
+
+    /// Bind the inbound request id to this scope so outbound calls and DB
+    /// queries can be correlated to the originating request.
+    pub fn set_request_id(&mut self, request_id: Option<String>) {
+        self.request_id = request_id;
+    }
+
+    /// The active request id, if any.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// Snapshot the active distributed-trace context carried by this scope.
+    pub fn trace_context(&self) -> crate::propagation::TraceContext {
+        crate::propagation::TraceContext {
+            trace_id: self.trace_id.clone(),
+            parent_span_id: self.span_id.clone(),
+            request_id: self.request_id.clone(),
+            baggage: None,
+        }
     }
 
     /// Append a breadcrumb, trimming to the ring-buffer cap.
