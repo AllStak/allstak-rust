@@ -149,11 +149,8 @@ impl EventSpool {
             .unwrap_or_else(|| default_offline_queue_dir(&options.api_key));
         let spool = EventSpool {
             dir,
-            max_events: options.offline_queue_max_events.max(1).min(10_000),
-            max_bytes: options
-                .offline_queue_max_bytes
-                .max(1)
-                .min(1024 * 1024 * 1024),
+            max_events: options.offline_queue_max_events.clamp(1, 10_000),
+            max_bytes: options.offline_queue_max_bytes.clamp(1, 1024 * 1024 * 1024),
         };
         if spool.ensure_dir().is_err() {
             return None;
@@ -574,7 +571,7 @@ async fn deliver(
 async fn backoff(attempt: u32) {
     // Exponential backoff capped at ~4s: 250ms, 500ms, 1s, ...
     let millis = 250u64.saturating_mul(1 << attempt).min(4000);
-    let jitter = (crate::util::now_millis() % 125) as u64;
+    let jitter = crate::util::now_millis() % 125;
     tokio::time::sleep(Duration::from_millis(millis + jitter)).await;
 }
 

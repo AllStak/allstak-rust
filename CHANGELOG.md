@@ -3,6 +3,14 @@
 All notable changes to the `allstak` crate are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-06
+
+### Fixed
+
+- Fixed clippy warnings in transport bounds and backoff jitter code.
+- Corrected the declared minimum supported Rust version to 1.88, matching the
+  current dependency graph used by the public crate.
+
 ## [0.2.1] - 2026-06-06
 
 ### Fixed

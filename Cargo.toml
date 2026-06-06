@@ -1,8 +1,8 @@
 [package]
 name = "allstak"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/AllStak/allstak-rust"
 homepage = "https://allstak.sa"

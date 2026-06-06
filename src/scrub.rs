@@ -212,7 +212,7 @@ mod tests {
             "release": "20260605054443-rust1",
             "environment": "dev-sdk-audit",
             "sdkName": "allstak-rust",
-            "sdkVersion": "0.2.1",
+            "sdkVersion": "0.2.2",
             "traceId": "12345678901234567890123456789012",
             "message": "card 4111 1111 1111 1111",
             "metadata": {
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(v["release"], serde_json::json!("20260605054443-rust1"));
         assert_eq!(v["environment"], serde_json::json!("dev-sdk-audit"));
         assert_eq!(v["sdkName"], serde_json::json!("allstak-rust"));
-        assert_eq!(v["sdkVersion"], serde_json::json!("0.2.1"));
+        assert_eq!(v["sdkVersion"], serde_json::json!("0.2.2"));
         assert_eq!(
             v["traceId"],
             serde_json::json!("12345678901234567890123456789012")
