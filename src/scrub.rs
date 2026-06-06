@@ -39,6 +39,21 @@ const SENSITIVE_KEY_TERMS: &[&str] = &[
     "csrf",
 ];
 
+const IDENTITY_KEY_EXEMPTIONS: &[&str] = &[
+    "release",
+    "environment",
+    "sdkname",
+    "sdkversion",
+    "platform",
+    "dist",
+    "traceid",
+    "spanid",
+    "parentspanid",
+    "requestid",
+    "sessionid",
+    "transactionid",
+];
+
 static EMAIL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}").expect("email regex"));
 
@@ -100,6 +115,13 @@ pub fn scrub_value(value: &mut Value) {
                 if is_sensitive_key(k) {
                     REDACTION_COUNT.fetch_add(1, Ordering::Relaxed);
                     *v = Value::String(REDACTED.to_string());
+                } else if is_identity_key(k) {
+                    // SDK identity/correlation fields are not user metadata.
+                    // Timestamped release names can look like credit-card-ish
+                    // digit runs; preserving them keeps dashboard release and
+                    // trace filtering usable without weakening secret-key
+                    // redaction above.
+                    continue;
                 } else {
                     scrub_value(v);
                 }
@@ -117,6 +139,15 @@ pub fn redaction_count() -> u64 {
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     SENSITIVE_KEY_TERMS.iter().any(|term| lower.contains(term))
+}
+
+fn is_identity_key(key: &str) -> bool {
+    let compact = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    IDENTITY_KEY_EXEMPTIONS.iter().any(|term| compact == *term)
 }
 
 #[cfg(test)]
@@ -173,5 +204,31 @@ mod tests {
         assert_eq!(v["Authorization"], serde_json::json!("[redacted]"));
         assert_eq!(v["nested"]["apiKey"], serde_json::json!("[redacted]"));
         assert_eq!(v["safe"], serde_json::json!("ok"));
+    }
+
+    #[test]
+    fn preserves_identity_fields_that_look_like_numeric_secrets() {
+        let mut v = serde_json::json!({
+            "release": "20260605054443-rust1",
+            "environment": "dev-sdk-audit",
+            "sdkName": "allstak-rust",
+            "sdkVersion": "0.2.1",
+            "traceId": "12345678901234567890123456789012",
+            "message": "card 4111 1111 1111 1111",
+            "metadata": {
+                "password": "20260605054443-rust1"
+            }
+        });
+        scrub_value(&mut v);
+        assert_eq!(v["release"], serde_json::json!("20260605054443-rust1"));
+        assert_eq!(v["environment"], serde_json::json!("dev-sdk-audit"));
+        assert_eq!(v["sdkName"], serde_json::json!("allstak-rust"));
+        assert_eq!(v["sdkVersion"], serde_json::json!("0.2.1"));
+        assert_eq!(
+            v["traceId"],
+            serde_json::json!("12345678901234567890123456789012")
+        );
+        assert_eq!(v["message"], serde_json::json!("card [redacted]"));
+        assert_eq!(v["metadata"]["password"], serde_json::json!("[redacted]"));
     }
 }

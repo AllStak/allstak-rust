@@ -3,6 +3,14 @@
 All notable changes to the `allstak` crate are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-06
+
+### Fixed
+
+- Preserved release, environment, SDK identity, trace, span, request, session,
+  and transaction fields during value redaction so numeric-looking release names
+  are not mistaken for secrets.
+
 ## [0.2.0] - 2026-05-30
 
 Auto-instrumentation: make outbound HTTP and database tracing automatic, and
